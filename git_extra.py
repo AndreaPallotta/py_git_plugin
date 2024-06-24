@@ -3,6 +3,8 @@ import os
 import click
 import subprocess
 import configparser
+import re
+from texttable import Texttable
 
 CONFIG_FILE = os.path.expanduser("~/.gitconfig")
 config = configparser.ConfigParser()
@@ -28,16 +30,16 @@ def _find_git_folder(path):
             return el_path
     return None
 
-def get_commit_list(directory):
+def _get_commit_list(directory):
     try:
         result = __run(["git", "log", "--oneline"], directory)
         if result.returncode == 0:
-            return result.stdout.strip().split('\n')
+            return result.stdout.strip().split("\n")
     except subprocess.CalledProcessError as e:
         click.echo(f"Error retrieving commit list: {e.stderr}")
     return []
 
-def cherry_pick_commits(commits, target_branch, directory, auto_resolve=False):
+def _cherry_pick_commits(commits, target_branch, directory, auto_resolve=False):
     try:
         __run(["git", "checkout", target_branch], directory)
         for commit in commits:
@@ -56,6 +58,11 @@ def cherry_pick_commits(commits, target_branch, directory, auto_resolve=False):
         __run(["git", "cherry-pick", "--abort"], directory)
         click.echo("Cherry-pick aborted due to conflict.")
 
+def _sanitize_alias(name):
+    """Sanitize alias name to remove invalid characters."""
+    reg = re.compile('[^a-zA-Z]')
+    return reg.sub('', name)
+
 @click.group()
 @click.option("-p", "--path", default=".", type=str, help="Target path to search")
 @click.pass_context
@@ -67,9 +74,9 @@ def cli(ctx, path):
         ctx.exit()
     parent_dir = os.path.dirname(git_path)
     ctx.obj = {
-        'path': absolute_path,
-        'git_path': git_path,
-        'parent_dir': parent_dir
+        "path": absolute_path,
+        "git_path": git_path,
+        "parent_dir": parent_dir
     }
 
 @cli.command()
@@ -77,7 +84,7 @@ def cli(ctx, path):
 @click.pass_context
 def push(ctx, message):
     """Add, commit with message, and push"""
-    parent_dir = ctx.obj['parent_dir']
+    parent_dir = ctx.obj["parent_dir"]
     __run(["git", "add", "."], parent_dir)
     __run(["git", "commit", "-m", message], parent_dir)
     __run(["git", "push"], parent_dir)
@@ -90,34 +97,44 @@ def push(ctx, message):
 @click.pass_context
 def cherry_pick(ctx, cherry_pick, branch, auto_resolve, interactive):
     """Interactive cherry-picking"""
-    parent_dir = ctx.obj['parent_dir']
+    parent_dir = ctx.obj["parent_dir"]
     if interactive:
-        commits = get_commit_list(parent_dir)
+        commits = _get_commit_list(parent_dir)
         for i, commit in enumerate(commits):
             print(f"{i}: {commit}")
         selected_commits = click.prompt("Enter the numbers of commits to cherry-pick, separated by commas", type=str)
         selected_indices = [int(x) for x in selected_commits.split(",")]
         cherry_pick = [commits[i].split()[0] for i in selected_indices]
     if cherry_pick and branch:
-        cherry_pick_commits(cherry_pick, branch, parent_dir, auto_resolve)
+        _cherry_pick_commits(cherry_pick, branch, parent_dir, auto_resolve)
 
-@click.command()
+@cli.command()
 @click.argument("name")
 @click.argument("command")
 def alias_add(name, command):
     """Add new alias."""
-    config["aliases"][name] = command
+    name = _sanitize_alias(name)
+    if "alias" not in config:
+        config["alias"] = {}
+    if name in config["alias"]:
+        click.echo(f"Alias '{name}' already exists")
+        return
+    config["alias"][_sanitize_alias(name)] = command
     with open(CONFIG_FILE, "w") as config_file:
         config.write(config_file)
     click.echo(f"Alias '{name}' added for command '{command}'")
 
 @cli.command()
-@click.argument('name')
+@click.argument("name")
 def alias_remove(name):
     """Remove alias."""
-    if name in config['aliases']:
-        del config['aliases'][name]
-        with open(CONFIG_FILE, 'w') as configfile:
+    if "alias" not in config:
+        click.echo(f"Cannot delete '{name}'. No aliases found")
+        return
+
+    if name in config["alias"]:
+        del config["alias"][name]
+        with open(CONFIG_FILE, "w") as configfile:
             config.write(configfile)
         click.echo(f"Alias '{name}' removed.")
     else:
@@ -126,27 +143,33 @@ def alias_remove(name):
 @cli.command()
 def alias_list():
     """List all defined aliases."""
-    if 'aliases' in config:
-        for alias, command in config['aliases'].items():
-            click.echo(f"{alias}: {command}")
+    if "alias" in config:
+        t = Texttable()
+        t.add_row(["Alias", "Command"])
+        if config["alias"].__len__() == 0:
+            t.add_row(["No aliases found", ""])
+        else:
+            for alias, command in config["alias"].items():
+                t.add_row([alias, command])
+        click.echo(t.draw())
     else:
         click.echo("No aliases defined.")
 
 @cli.command()
 def alias_clear():
     """Clear all defined aliases."""
-    config['aliases'] = {}
-    with open(CONFIG_FILE, 'w') as configfile:
+    config["alias"] = {}
+    with open(CONFIG_FILE, "w") as configfile:
         config.write(configfile)
     click.echo("All aliases cleared.")
 
 @cli.command()
-@click.argument('alias_name')
-@click.argument('args', nargs=-1)
+@click.argument("alias_name")
+@click.argument("args", nargs=-1)
 def run_alias(alias_name, args):
     """Run a command using an alias."""
-    if alias_name in config['aliases']:
-        command = config['aliases'][alias_name]
+    if alias_name in config["alias"]:
+        command = config["alias"][alias_name]
         full_command = command.split() + list(args)
         subprocess.run(full_command)
     else:
